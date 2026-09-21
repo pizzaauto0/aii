@@ -12,13 +12,13 @@ Lokal: `python3 -m http.server 8000 --directory dist`, dann `http://localhost:80
 
 Die Namen in der Oberfläche stehen für drei echte Modellgrößen aus Qwen2.5-Instruct (Apache 2.0), quantisiert für WebLLM:
 
-- **KiwiGPT Mini:** 0,5B, ungefähr 1,1 GB Grafikspeicher, für einfache Fragen.
-- **KiwiGPT Normal:** 1,5B, ungefähr 1,9 GB Grafikspeicher, manuell für alltägliche Aufgaben auswählbar.
-- **KiwiGPT Groß:** 3B, ungefähr 2,9 GB Grafikspeicher, wird im Automatikmodus beim Schreiben geladen.
+- **KiwiGPT Mini:** 0,5B, ungefähr 0,95 GB Grafikspeicher, für einfache Fragen.
+- **KiwiGPT Normal:** 1,5B, ungefähr 1,63 GB Grafikspeicher, manuell für alltägliche Aufgaben auswählbar.
+- **KiwiGPT Groß:** 3B, ungefähr 2,50 GB Grafikspeicher, wird im Automatikmodus beim Schreiben geladen.
 
 WebGPU ist erforderlich. Browser, Treiber und Geräte können die Ausführung einschränken; insbesondere Mobilgeräte können für Normal oder Groß zu wenig Speicher haben. Es gibt keinen simulierten Antwortmodus und keinen versteckten Cloud-Fallback.
 
-Laufzeitcode von esm.run, Modellgewichte von Hugging Face und WASM-Modellbibliotheken aus der WebLLM-Konfiguration werden beim ersten Schreiben oder bei einem Modellwechsel geladen. Die Inferenz erfolgt lokal; die Download-Anbieter sehen die üblichen Netzwerkmetadaten. Der Browser kann Modelldaten zwischenspeichern, aber ein vollständig offlinefähiger App-Start wird nicht garantiert.
+Laufzeitcode von esm.run, Modellgewichte von Hugging Face und WASM-Modellbibliotheken aus der WebLLM-Konfiguration werden beim ersten Schreiben oder bei einem Modellwechsel geladen. Die Inferenz erfolgt lokal; die Download-Anbieter sehen die üblichen Netzwerkmetadaten. KiwiGPT verwendet den persistenten IndexedDB-Cache von WebLLM und bittet den Browser darum, diesen Gerätespeicher nicht automatisch zu entfernen. Nach dem Aktualisieren stellt KiwiGPT das zuletzt erfolgreich geladene Modell automatisch aus diesem Cache wieder her. Ein Browser-Reload kann den Arbeitsspeicher nicht behalten; löscht der Browser seine Websitedaten, muss er die Modelldaten erneut laden.
 
 ## Funktionen und Grenzen
 
