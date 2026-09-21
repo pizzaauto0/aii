@@ -6,7 +6,8 @@ const MODELS = {
  normal: {name:'KiwiGPT Normal',short:'Normal',id:'Qwen2.5-1.5B-Instruct-q4f32_1-MLC',detail:'Ausgewogen für alltägliche Aufgaben',memory:'ungefähr 1,9 GB'},
  large: {name:'KiwiGPT Groß',short:'Groß',id:'Qwen2.5-3B-Instruct-q4f32_1-MLC',detail:'Stärker für schwierige Aufgaben',memory:'ungefähr 2,9 GB'}
 };
-let engine, worker, loadPromise, queuedModel, activeModel, busy = false, loading = false, stopped = false, attachment = null, recognition;
+let engine, worker, loadPromise, queuedModel, activeModel, pendingEngine, pendingWorker, pendingModel, busy = false, loading = false, stopped = false, attachment = null, recognition;
+const modelFailures = {};
 let selectedModel = ['auto','mini','normal','large'].includes(localStorage.getItem('kiwigpt-model-v2')) ? localStorage.getItem('kiwigpt-model-v2') : 'auto';
 let autoTarget = 'mini';
 let chats = [], currentId, voiceConsent = false;
@@ -25,10 +26,12 @@ function setBusy(value) { busy=value;$('#new-chat').disabled=value;$('#mode').di
 function scrollBottom() { $('#conversation').scrollTop=$('#conversation').scrollHeight; }
 function confirmAction(title,text){return new Promise(resolve=>{const d=$('#confirm');$('#confirm-title').textContent=title;$('#confirm-text').textContent=text;let settled=false;const finish=v=>{if(settled)return;settled=true;d.close();resolve(v);};$('#confirm-no').onclick=()=>finish(false);$('#confirm-yes').onclick=()=>finish(true);d.oncancel=e=>{e.preventDefault();finish(false);};d.showModal();});}
 const desiredModel = () => selectedModel==='auto' ? autoTarget : selectedModel;
-function updateModelUI() { const target=desiredModel(),model=MODELS[target],automatic=selectedModel==='auto';$('#model-choice').value=selectedModel;$('#model-name').textContent=(automatic?'Auto · ':'')+model.short;$('#settings-model-name').textContent=(automatic?'Automatisch · ':'')+model.name;$('#settings-model-detail').textContent=automatic?'Startet mit Mini und lädt beim Schreiben KiwiGPT Groß':model.detail;$('#footer-model').textContent=(automatic?'Automatisch · ':'')+model.name;$('#load-model').textContent=activeModel===target?model.name+' ist bereit':model.name+' jetzt herunterladen';if(!loading)$('#model-status').textContent=activeModel===target?model.short+' · bereit':model.short+' · wartet';if(!loading)$('#load-detail').textContent=model.name+' benötigt '+model.memory+' Grafikspeicher. Ein WebGPU-fähiger Browser ist erforderlich.';$('#status-dot').classList.toggle('ready',activeModel===target); }
+function updateModelUI() { const target=desiredModel(),model=MODELS[target],automatic=selectedModel==='auto';$('#model-choice').value=selectedModel;$('#model-name').textContent=(automatic?'Auto · ':'')+model.short;$('#settings-model-name').textContent=(automatic?'Automatisch · ':'')+model.name;$('#settings-model-detail').textContent=automatic?'Startet mit Mini und lädt beim Schreiben KiwiGPT Groß':model.detail;$('#footer-model').textContent=(automatic?'Automatisch · ':'')+model.name;$('#load-model').textContent=activeModel===target?model.name+' ist bereit':model.name+' jetzt herunterladen';if(!loading)$('#model-status').textContent=activeModel===target?model.short+' · bereit':pendingModel===target?model.short+' · bereit nach dieser Antwort':model.short+' · wartet';if(!loading)$('#load-detail').textContent=model.name+' benötigt '+model.memory+' Grafikspeicher. Ein WebGPU-fähiger Browser ist erforderlich.';$('#status-dot').classList.toggle('ready',activeModel===target); }
+function activatePendingModel() { if(!pendingEngine)return; worker?.terminate();worker=pendingWorker;engine=pendingEngine;activeModel=pendingModel;pendingWorker=null;pendingEngine=null;pendingModel=null;updateModelUI(); }
 async function loadModel(targetOverride) {
  const target=targetOverride||desiredModel();
  if(activeModel===target&&engine)return engine;
+ if(pendingModel===target&&pendingEngine)return pendingEngine;
  if(loadPromise){queuedModel=target;try{await loadPromise;}catch{}const next=queuedModel;queuedModel=null;if(next&&next!==activeModel)return loadModel(next);if(activeModel===target)return engine;return loadModel(target);}
  const model=MODELS[target];
  loadPromise=(async()=>{let failure;loading=true;$('#model-choice').disabled=true;$('#load-model').disabled=true;$('#load-progress').hidden=false;$('#model-status').textContent=model.short+' · lädt';
@@ -36,18 +39,22 @@ async function loadModel(targetOverride) {
   if(!navigator.gpu)throw new Error('WebGPU ist hier nicht verfügbar. Öffne KiwiGPT in einem aktuellen WebGPU-fähigen Browser auf einem unterstützten Gerät.');
   const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw new Error('Keine kompatible GPU gefunden. Versuche ein anderes Gerät oder aktiviere die Hardwarebeschleunigung.');
   const progress=p=>{const value=Math.max(0,Math.min(1,p.progress||0));$('#load-progress').value=value;$('#load-detail').textContent=p.text;$('#model-status').textContent=`${model.short} · ${Math.round(value*100)} %`;};
-  if(engine){worker?.terminate();worker=null;engine=null;activeModel=null;}
-  const {CreateWebWorkerMLCEngine}=await import('https://esm.run/@mlc-ai/web-llm@0.2.79');worker=new Worker(new URL('./worker.js',import.meta.url),{type:'module'});engine=await CreateWebWorkerMLCEngine(worker,model.id,{initProgressCallback:progress});
-  activeModel=target;notice('');return engine;
- } catch(e) {failure=e;if(!activeModel){worker?.terminate();worker=null;engine=null;}notice('Modelldownload fehlgeschlagen. Öffne die Modelleinstellungen für Details.');throw e;
- } finally {loading=false;loadPromise=null;$('#load-progress').hidden=true;$('#load-model').disabled=false;$('#model-choice').disabled=busy;updateModelUI();if(failure){$('#model-status').textContent=model.short+' · Fehler';$('#load-detail').textContent='Das Modell konnte nicht gestartet werden: '+failure.message;}}
+  const {CreateWebWorkerMLCEngine}=await import('https://esm.run/@mlc-ai/web-llm@0.2.79');const nextWorker=new Worker(new URL('./worker.js',import.meta.url),{type:'module'});let nextEngine;
+  try{nextEngine=await CreateWebWorkerMLCEngine(nextWorker,model.id,{initProgressCallback:progress});}catch(error){nextWorker.terminate();throw error;}
+  delete modelFailures[target];
+  if(busy&&engine){pendingWorker?.terminate();pendingWorker=nextWorker;pendingEngine=nextEngine;pendingModel=target;}else{worker?.terminate();worker=nextWorker;engine=nextEngine;activeModel=target;}
+  notice('');return nextEngine;
+ } catch(e) {failure=e;modelFailures[target]=e;notice('Modelldownload fehlgeschlagen. KiwiGPT Mini bleibt verfügbar. Öffne die Modelleinstellungen für Details oder versuche es später erneut.');throw e;
+ } finally {loading=false;loadPromise=null;$('#load-progress').hidden=true;$('#load-model').disabled=false;$('#model-choice').disabled=busy;updateModelUI();if(failure){$('#model-status').textContent=selectedModel==='auto'&&target==='large'&&activeModel==='mini'?'Mini · bereit':model.short+' · Fehler';$('#load-detail').textContent='Das Modell konnte nicht gestartet werden: '+failure.message;}}
  })();return loadPromise;
 }
 const MODES={fast:{tokens:192,instruction:'Antworte kurz und direkt in höchstens drei Sätzen.'},balanced:{tokens:512,instruction:'Antworte verständlich mit passenden Details und kurzen Absätzen.'},deep:{tokens:768,instruction:'Beantworte die Frage sorgfältig. Nenne relevante Annahmen und Unsicherheiten. Gib eine klare Lösung.'}};
 function contextMessages(messages,system) { let remaining=2600-bytes(system),chosen=[];for(let i=messages.length-1;i>=0;i--){const m=messages[i];if(!m.content)continue;const cost=bytes(m.content)+24;if(cost>remaining)break;chosen.unshift({role:m.role,content:m.content});remaining-=cost;}while(chosen.length&&chosen[0].role!=='user')chosen.shift();if(!chosen.length)throw new Error('Diese Nachricht ist zu lang für das kleine Modell. Bitte kürze sie auf etwa 1.500 Zeichen.');return [{role:'system',content:system},...chosen]; }
 async function generate(regenerate=false) {
  if(busy){stopped=true;engine?.interruptGenerate();return;}
- const target=desiredModel();if(activeModel!==target||!engine){notice(MODELS[target].name+' wird geladen. Deine Nachricht bleibt erhalten.');try{await loadModel(target);}catch{return;}}
+ const target=desiredModel();const canUseMiniWhileLargeLoads=selectedModel==='auto'&&target==='large'&&(loading||modelFailures.large)&&activeModel==='mini'&&engine;
+ if(canUseMiniWhileLargeLoads){notice(loading?'KiwiGPT Groß wird im Hintergrund geladen. KiwiGPT Mini antwortet jetzt.':'KiwiGPT Groß konnte nicht geladen werden. KiwiGPT Mini antwortet weiter.');}
+ else if(activeModel!==target||!engine){notice(MODELS[target].name+' wird geladen. Deine Nachricht bleibt erhalten.');try{await loadModel(target);}catch{return;}}
  const chat=current();let input=$('#prompt').value.trim();
  if(!regenerate){if(!input&&!attachment)return;input+=(attachment?'\n\nTextdatei '+attachment.name+':\n'+attachment.text:'');if(bytes(input)>2000){notice('Die Nachricht mit Anhang ist zu lang. Bitte auf höchstens 2.000 UTF-8-Bytes kürzen (ungefähr 1.500–2.000 Zeichen).');return;}chat.messages.push({role:'user',content:input});chat.title=chat.messages.find(m=>m.role==='user').content.slice(0,45);$('#prompt').value='';$('#prompt').style.height='auto';attachment=null;renderAttachment();}
  else if(chat.messages.at(-1)?.role==='assistant'){chat.messages.pop();}
@@ -62,7 +69,7 @@ async function generate(regenerate=false) {
   if(!reply.content){chat.messages.pop();notice(stopped?'Antwort gestoppt.':'Das Modell hat keine Antwort geliefert. Versuche eine kürzere Frage.');}else if(stopped)notice('Antwort gestoppt.');
   if(!stopped&&reply.content&&$('#read-aloud').checked)speak(reply.content);
  } catch(e) {if(!reply.content)chat.messages.pop();notice('Keine vollständige Antwort: '+e.message+' Versuche eine kürzere Frage oder lade die Seite neu.');}
- finally {setBusy(false);save();render();scrollBottom();}
+ finally {setBusy(false);activatePendingModel();save();render();scrollBottom();}
 }
 function renderAttachment(){const el=$('#attachment');el.replaceChildren();el.hidden=!attachment;if(attachment){const text=document.createElement('span');text.textContent='Textdatei: '+attachment.name;const remove=document.createElement('button');remove.textContent='Entfernen';remove.onclick=()=>{attachment=null;renderAttachment();};el.append(text,remove);}}
 $('#composer').onsubmit=e=>{e.preventDefault();generate();};$('#prompt').oninput=()=>{const el=$('#prompt');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,180)+'px';if(el.value.trim()&&selectedModel==='auto'&&autoTarget!=='large'){autoTarget='large';updateModelUI();loadModel('large').catch(()=>{});}else if(el.value.trim()&&selectedModel!=='auto'&&activeModel!==selectedModel)loadModel(selectedModel).catch(()=>{});};$('#prompt').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&matchMedia('(min-width:761px)').matches){e.preventDefault();generate();}};
@@ -82,4 +89,4 @@ updateModelUI();currentId=chats.find(c=>c.messages.length)?.id;if(!currentId)new
 if(!navigator.gpu){$('#model-status').textContent='WebGPU erforderlich';$('#load-detail').textContent='Dieser Browser stellt kein WebGPU bereit. Ein unterstützter Browser und ein kompatibles Gerät sind für die lokale KI nötig.';}
 const lifecycle=new AbortController();
 if(document.modelContext?.registerTool){try{Promise.resolve(document.modelContext.registerTool({name:'stage_kiwigpt_message',title:'Nachricht in KiwiGPT vorbereiten',description:'Trägt Text ins sichtbare Eingabefeld ein und startet im Automatikmodus KiwiGPT Groß. Sendet die Nachricht nicht.',inputSchema:{type:'object',properties:{text:{type:'string',maxLength:1500}},required:['text'],additionalProperties:false},annotations:{readOnlyHint:false},execute(input){if(!input||typeof input.text!=='string'||input.text.length>1500||Object.keys(input).some(k=>k!=='text'))throw new Error('Ein Text mit höchstens 1.500 Zeichen ist erforderlich.');if(busy)throw new Error('KiwiGPT antwortet noch.');$('#prompt').value=input.text;$('#prompt').dispatchEvent(new Event('input'));return {staged:true,text:$('#prompt').value,model:MODELS[desiredModel()].name};}},{signal:lifecycle.signal})).catch(()=>{});}catch{}}
-window.addEventListener('pagehide',()=>{lifecycle.abort();worker?.terminate();window.speechSynthesis?.cancel();recognition?.stop();});
+window.addEventListener('pagehide',()=>{lifecycle.abort();worker?.terminate();pendingWorker?.terminate();window.speechSynthesis?.cancel();recognition?.stop();});

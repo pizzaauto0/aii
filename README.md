@@ -22,7 +22,7 @@ Laufzeitcode von esm.run, Modellgewichte von Hugging Face und WASM-Modellbibliot
 
 ## Funktionen und Grenzen
 
-- Automatischer Mini-Download beim Öffnen, automatischer Wechsel zu Groß beim Schreiben, manuelle Modellauswahl, Streaming-Antworten, Stoppen, erneute Antwort, Kopieren, Chatverlauf und Suche.
+- Automatischer Mini-Download beim Öffnen, Hintergrund-Download von Groß beim Schreiben und sichere Rückfallebene: Während Groß lädt oder auf einem Gerät nicht gestartet werden kann, beantwortet Mini die Nachricht weiter. Manuelle Modellauswahl, Streaming-Antworten, Stoppen, erneute Antwort, Kopieren, Chatverlauf und Suche.
 - Schnell: 192 Ausgabetokens; Ausgewogen: 512; Gründlich: Entwurf und zusätzlicher Prüf-Durchlauf mit je bis zu 768 Tokens. Keine Behauptung, ChatGPT-Reasoning nachzubilden oder zuverlässig bessere Antworten zu garantieren.
 - Gerätespeicher statt Konto/Cloud-Sync; JSON-Export und Löschen einzelner Chats.
 - Kleine TXT/MD/CSV/JSON-Anhänge, maximal 1.600 Bytes; pro Eingabe insgesamt maximal 2.000 UTF-8-Bytes. Alte Nachrichten werden kontextabhängig weggelassen, um in das 4.096-Token-Fenster zu passen.
