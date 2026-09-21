@@ -2,14 +2,15 @@ const $ = s => document.querySelector(s);
 const enc = new TextEncoder();
 const bytes = text => enc.encode(text).length;
 const MODELS = {
- mini: {name:'KiwiGPT Mini',short:'Mini',id:'Qwen2.5-0.5B-Instruct-q4f32_1-MLC',detail:'Leicht und schnell',memory:'ungefähr 1,1 GB'},
- normal: {name:'KiwiGPT Normal',short:'Normal',id:'Qwen2.5-1.5B-Instruct-q4f32_1-MLC',detail:'Ausgewogen für alltägliche Aufgaben',memory:'ungefähr 1,9 GB'},
- large: {name:'KiwiGPT Groß',short:'Groß',id:'Qwen2.5-3B-Instruct-q4f32_1-MLC',detail:'Stärker für schwierige Aufgaben',memory:'ungefähr 2,9 GB'}
+ mini: {name:'KiwiGPT Mini',short:'Mini',id:'Qwen2.5-0.5B-Instruct-q4f16_1-MLC',detail:'Leicht und schnell',memory:'ungefähr 0,95 GB'},
+ normal: {name:'KiwiGPT Normal',short:'Normal',id:'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',detail:'Ausgewogen für alltägliche Aufgaben',memory:'ungefähr 1,63 GB'},
+ large: {name:'KiwiGPT Groß',short:'Groß',id:'Qwen2.5-3B-Instruct-q4f16_1-MLC',detail:'Stärker für schwierige Aufgaben',memory:'ungefähr 2,50 GB'}
 };
 let engine, worker, loadPromise, queuedModel, activeModel, pendingEngine, pendingWorker, pendingModel, busy = false, loading = false, stopped = false, attachment = null, recognition;
 const modelFailures = {};
 let selectedModel = ['auto','mini','normal','large'].includes(localStorage.getItem('kiwigpt-model-v2')) ? localStorage.getItem('kiwigpt-model-v2') : 'auto';
-let autoTarget = 'mini';
+const rememberedModel = ['mini','normal','large'].includes(localStorage.getItem('kiwigpt-last-ready-model')) ? localStorage.getItem('kiwigpt-last-ready-model') : 'mini';
+let autoTarget = selectedModel==='auto' ? rememberedModel : 'mini';
 let chats = [], currentId, voiceConsent = false;
 try { const saved = JSON.parse(localStorage.getItem('kiwigpt-chats') || localStorage.getItem('aii-chats') || '[]'); if (Array.isArray(saved)) chats = saved.filter(c => typeof c.id === 'string' && typeof c.title === 'string' && Array.isArray(c.messages)).map(c => ({...c,messages:c.messages.filter(m=>['user','assistant'].includes(m.role)&&typeof m.content==='string')})); } catch {}
 const current = () => chats.find(c => c.id === currentId);
@@ -26,8 +27,9 @@ function setBusy(value) { busy=value;$('#new-chat').disabled=value;$('#mode').di
 function scrollBottom() { $('#conversation').scrollTop=$('#conversation').scrollHeight; }
 function confirmAction(title,text){return new Promise(resolve=>{const d=$('#confirm');$('#confirm-title').textContent=title;$('#confirm-text').textContent=text;let settled=false;const finish=v=>{if(settled)return;settled=true;d.close();resolve(v);};$('#confirm-no').onclick=()=>finish(false);$('#confirm-yes').onclick=()=>finish(true);d.oncancel=e=>{e.preventDefault();finish(false);};d.showModal();});}
 const desiredModel = () => selectedModel==='auto' ? autoTarget : selectedModel;
-function updateModelUI() { const target=desiredModel(),model=MODELS[target],automatic=selectedModel==='auto';$('#model-choice').value=selectedModel;$('#model-name').textContent=(automatic?'Auto · ':'')+model.short;$('#settings-model-name').textContent=(automatic?'Automatisch · ':'')+model.name;$('#settings-model-detail').textContent=automatic?'Startet mit Mini und lädt beim Schreiben KiwiGPT Groß':model.detail;$('#footer-model').textContent=(automatic?'Automatisch · ':'')+model.name;$('#load-model').textContent=activeModel===target?model.name+' ist bereit':model.name+' jetzt herunterladen';if(!loading)$('#model-status').textContent=activeModel===target?model.short+' · bereit':pendingModel===target?model.short+' · bereit nach dieser Antwort':model.short+' · wartet';if(!loading)$('#load-detail').textContent=model.name+' benötigt '+model.memory+' Grafikspeicher. Ein WebGPU-fähiger Browser ist erforderlich.';$('#status-dot').classList.toggle('ready',activeModel===target); }
-function activatePendingModel() { if(!pendingEngine)return; worker?.terminate();worker=pendingWorker;engine=pendingEngine;activeModel=pendingModel;pendingWorker=null;pendingEngine=null;pendingModel=null;updateModelUI(); }
+function updateModelUI() { const target=desiredModel(),model=MODELS[target],automatic=selectedModel==='auto',resume=automatic&&localStorage.getItem('kiwigpt-last-ready-model')===target&&target!=='mini';$('#model-choice').value=selectedModel;$('#model-name').textContent=(automatic?'Auto · ':'')+model.short;$('#settings-model-name').textContent=(automatic?'Automatisch · ':'')+model.name;$('#settings-model-detail').textContent=automatic?(resume?'Stellt dieses Modell nach dem Aktualisieren aus dem Gerätespeicher wieder her':'Startet mit Mini und lädt beim Schreiben KiwiGPT Groß'):model.detail;$('#footer-model').textContent=(automatic?'Automatisch · ':'')+model.name;$('#load-model').textContent=activeModel===target?model.name+' ist bereit':model.name+' jetzt herunterladen';if(!loading)$('#model-status').textContent=activeModel===target?model.short+' · bereit':pendingModel===target?model.short+' · bereit nach dieser Antwort':model.short+' · wartet';if(!loading)$('#load-detail').textContent=model.name+' benötigt '+model.memory+' Grafikspeicher. Ein WebGPU-fähiger Browser ist erforderlich.';$('#status-dot').classList.toggle('ready',activeModel===target); }
+function rememberReadyModel(model) { localStorage.setItem('kiwigpt-last-ready-model',model); }
+function activatePendingModel() { if(!pendingEngine)return; worker?.terminate();worker=pendingWorker;engine=pendingEngine;activeModel=pendingModel;rememberReadyModel(activeModel);pendingWorker=null;pendingEngine=null;pendingModel=null;updateModelUI(); }
 async function loadModel(targetOverride) {
  const target=targetOverride||desiredModel();
  if(activeModel===target&&engine)return engine;
@@ -39,10 +41,11 @@ async function loadModel(targetOverride) {
   if(!navigator.gpu)throw new Error('WebGPU ist hier nicht verfügbar. Öffne KiwiGPT in einem aktuellen WebGPU-fähigen Browser auf einem unterstützten Gerät.');
   const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw new Error('Keine kompatible GPU gefunden. Versuche ein anderes Gerät oder aktiviere die Hardwarebeschleunigung.');
   const progress=p=>{const value=Math.max(0,Math.min(1,p.progress||0));$('#load-progress').value=value;$('#load-detail').textContent=p.text;$('#model-status').textContent=`${model.short} · ${Math.round(value*100)} %`;};
-  const {CreateWebWorkerMLCEngine}=await import('https://esm.run/@mlc-ai/web-llm@0.2.79');const nextWorker=new Worker(new URL('./worker.js',import.meta.url),{type:'module'});let nextEngine;
-  try{nextEngine=await CreateWebWorkerMLCEngine(nextWorker,model.id,{initProgressCallback:progress});}catch(error){nextWorker.terminate();throw error;}
+  const {CreateWebWorkerMLCEngine,prebuiltAppConfig}=await import('https://esm.run/@mlc-ai/web-llm@0.2.84');const nextWorker=new Worker(new URL('./worker.js',import.meta.url),{type:'module'});let nextEngine;
+  const appConfig={...prebuiltAppConfig,cacheBackend:'indexeddb'};
+  try{nextEngine=await CreateWebWorkerMLCEngine(nextWorker,model.id,{appConfig,initProgressCallback:progress});}catch(error){nextWorker.terminate();throw error;}
   delete modelFailures[target];
-  if(busy&&engine){pendingWorker?.terminate();pendingWorker=nextWorker;pendingEngine=nextEngine;pendingModel=target;}else{worker?.terminate();worker=nextWorker;engine=nextEngine;activeModel=target;}
+  if(busy&&engine){pendingWorker?.terminate();pendingWorker=nextWorker;pendingEngine=nextEngine;pendingModel=target;}else{worker?.terminate();worker=nextWorker;engine=nextEngine;activeModel=target;rememberReadyModel(activeModel);}
   notice('');return nextEngine;
  } catch(e) {failure=e;modelFailures[target]=e;notice('Modelldownload fehlgeschlagen. KiwiGPT Mini bleibt verfügbar. Öffne die Modelleinstellungen für Details oder versuche es später erneut.');throw e;
  } finally {loading=false;loadPromise=null;$('#load-progress').hidden=true;$('#load-model').disabled=false;$('#model-choice').disabled=busy;updateModelUI();if(failure){$('#model-status').textContent=selectedModel==='auto'&&target==='large'&&activeModel==='mini'?'Mini · bereit':model.short+' · Fehler';$('#load-detail').textContent='Das Modell konnte nicht gestartet werden: '+failure.message;}}
@@ -85,7 +88,7 @@ $('#mic').onclick=async()=>{const Speech=window.SpeechRecognition||window.webkit
 $('#export').onclick=()=>{const blob=new Blob([JSON.stringify(chats.filter(c=>c.messages.length),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='kiwigpt-chats.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 $('#delete-chat').onclick=async()=>{if(busy)return;if(await confirmAction('Chat löschen?','Dieser Chat wird aus diesem Browser gelöscht. Das kann nicht rückgängig gemacht werden.')){chats=chats.filter(c=>c.id!==currentId);newChat();save();$('#settings').close();}};
 $('#read-aloud').onchange=()=>{if(!$('#read-aloud').checked)window.speechSynthesis?.cancel();};
-updateModelUI();currentId=chats.find(c=>c.messages.length)?.id;if(!currentId)newChat();else render();if(navigator.gpu)loadModel(selectedModel==='auto'?'mini':selectedModel).catch(()=>{});
+updateModelUI();currentId=chats.find(c=>c.messages.length)?.id;if(!currentId)newChat();else render();navigator.storage?.persist?.().catch(()=>{});if(navigator.gpu)loadModel(desiredModel()).catch(()=>{});
 if(!navigator.gpu){$('#model-status').textContent='WebGPU erforderlich';$('#load-detail').textContent='Dieser Browser stellt kein WebGPU bereit. Ein unterstützter Browser und ein kompatibles Gerät sind für die lokale KI nötig.';}
 const lifecycle=new AbortController();
 if(document.modelContext?.registerTool){try{Promise.resolve(document.modelContext.registerTool({name:'stage_kiwigpt_message',title:'Nachricht in KiwiGPT vorbereiten',description:'Trägt Text ins sichtbare Eingabefeld ein und startet im Automatikmodus KiwiGPT Groß. Sendet die Nachricht nicht.',inputSchema:{type:'object',properties:{text:{type:'string',maxLength:1500}},required:['text'],additionalProperties:false},annotations:{readOnlyHint:false},execute(input){if(!input||typeof input.text!=='string'||input.text.length>1500||Object.keys(input).some(k=>k!=='text'))throw new Error('Ein Text mit höchstens 1.500 Zeichen ist erforderlich.');if(busy)throw new Error('KiwiGPT antwortet noch.');$('#prompt').value=input.text;$('#prompt').dispatchEvent(new Event('input'));return {staged:true,text:$('#prompt').value,model:MODELS[desiredModel()].name};}},{signal:lifecycle.signal})).catch(()=>{});}catch{}}
