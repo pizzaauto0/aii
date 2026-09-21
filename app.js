@@ -6,11 +6,10 @@ const MODELS = {
  normal: {name:'KiwiGPT Normal',short:'Normal',id:'Qwen2.5-1.5B-Instruct-q4f16_1-MLC',detail:'Ausgewogen für alltägliche Aufgaben',memory:'ungefähr 1,63 GB'},
  large: {name:'KiwiGPT Groß',short:'Groß',id:'Qwen2.5-3B-Instruct-q4f16_1-MLC',detail:'Stärker für schwierige Aufgaben',memory:'ungefähr 2,50 GB'}
 };
-let engine, worker, loadPromise, queuedModel, activeModel, pendingEngine, pendingWorker, pendingModel, busy = false, loading = false, stopped = false, attachment = null, recognition;
+let engine, worker, loadPromise, queuedModel, activeModel, pendingEngine, pendingWorker, pendingModel, backgroundLargePromise, busy = false, loading = false, stopped = false, attachment = null, recognition;
 const modelFailures = {};
 let selectedModel = ['auto','mini','normal','large'].includes(localStorage.getItem('kiwigpt-model-v2')) ? localStorage.getItem('kiwigpt-model-v2') : 'auto';
-const rememberedModel = ['mini','normal','large'].includes(localStorage.getItem('kiwigpt-last-ready-model')) ? localStorage.getItem('kiwigpt-last-ready-model') : 'mini';
-let autoTarget = selectedModel==='auto' ? rememberedModel : 'mini';
+let autoTarget = 'mini';
 let chats = [], currentId, voiceConsent = false;
 try { const saved = JSON.parse(localStorage.getItem('kiwigpt-chats') || localStorage.getItem('aii-chats') || '[]'); if (Array.isArray(saved)) chats = saved.filter(c => typeof c.id === 'string' && typeof c.title === 'string' && Array.isArray(c.messages)).map(c => ({...c,messages:c.messages.filter(m=>['user','assistant'].includes(m.role)&&typeof m.content==='string')})); } catch {}
 const current = () => chats.find(c => c.id === currentId);
@@ -51,13 +50,29 @@ async function loadModel(targetOverride) {
  } finally {loading=false;loadPromise=null;$('#load-progress').hidden=true;$('#load-model').disabled=false;$('#model-choice').disabled=busy;updateModelUI();if(failure){$('#model-status').textContent=selectedModel==='auto'&&target==='large'&&activeModel==='mini'?'Mini · bereit':model.short+' · Fehler';$('#load-detail').textContent='Das Modell konnte nicht gestartet werden: '+failure.message;}}
  })();return loadPromise;
 }
+function prepareLargeInBackground() {
+ if(selectedModel!=='auto'||autoTarget!=='large'||activeModel==='large')return Promise.resolve();
+ if(backgroundLargePromise)return backgroundLargePromise;
+ backgroundLargePromise=(async()=>{
+  if(activeModel!=='mini'||!engine){
+   notice('KiwiGPT Mini wird zuerst vorbereitet. Danach lädt KiwiGPT Groß im Hintergrund.');
+   try{await loadModel('mini');}catch{return;}
+  }
+  if(selectedModel==='auto'&&autoTarget==='large'&&activeModel==='mini'&&engine){
+   try{await loadModel('large');}catch{}
+  }
+ })().finally(()=>{backgroundLargePromise=null;});
+ return backgroundLargePromise;
+}
 const MODES={fast:{tokens:192,instruction:'Antworte kurz und direkt in höchstens drei Sätzen.'},balanced:{tokens:512,instruction:'Antworte verständlich mit passenden Details und kurzen Absätzen.'},deep:{tokens:768,instruction:'Beantworte die Frage sorgfältig. Nenne relevante Annahmen und Unsicherheiten. Gib eine klare Lösung.'}};
 function contextMessages(messages,system) { let remaining=2600-bytes(system),chosen=[];for(let i=messages.length-1;i>=0;i--){const m=messages[i];if(!m.content)continue;const cost=bytes(m.content)+24;if(cost>remaining)break;chosen.unshift({role:m.role,content:m.content});remaining-=cost;}while(chosen.length&&chosen[0].role!=='user')chosen.shift();if(!chosen.length)throw new Error('Diese Nachricht ist zu lang für das kleine Modell. Bitte kürze sie auf etwa 1.500 Zeichen.');return [{role:'system',content:system},...chosen]; }
 async function generate(regenerate=false) {
  if(busy){stopped=true;engine?.interruptGenerate();return;}
- const target=desiredModel();const canUseMiniWhileLargeLoads=selectedModel==='auto'&&target==='large'&&(loading||modelFailures.large)&&activeModel==='mini'&&engine;
- if(canUseMiniWhileLargeLoads){notice(loading?'KiwiGPT Groß wird im Hintergrund geladen. KiwiGPT Mini antwortet jetzt.':'KiwiGPT Groß konnte nicht geladen werden. KiwiGPT Mini antwortet weiter.');}
- else if(activeModel!==target||!engine){notice(MODELS[target].name+' wird geladen. Deine Nachricht bleibt erhalten.');try{await loadModel(target);}catch{return;}}
+ const target=desiredModel();
+ if(selectedModel==='auto'&&target==='large'&&activeModel!=='large'){
+  if(activeModel!=='mini'||!engine){notice('KiwiGPT Mini wird für deine Nachricht vorbereitet.');try{await loadModel('mini');}catch{return;}}
+  if(activeModel==='mini'&&engine){notice(modelFailures.large?'KiwiGPT Groß konnte nicht geladen werden. KiwiGPT Mini antwortet weiter.':'KiwiGPT Groß lädt im Hintergrund. KiwiGPT Mini antwortet jetzt.');prepareLargeInBackground();}
+ } else if(activeModel!==target||!engine){notice(MODELS[target].name+' wird geladen. Deine Nachricht bleibt erhalten.');try{await loadModel(target);}catch{return;}}
  const chat=current();let input=$('#prompt').value.trim();
  if(!regenerate){if(!input&&!attachment)return;input+=(attachment?'\n\nTextdatei '+attachment.name+':\n'+attachment.text:'');if(bytes(input)>2000){notice('Die Nachricht mit Anhang ist zu lang. Bitte auf höchstens 2.000 UTF-8-Bytes kürzen (ungefähr 1.500–2.000 Zeichen).');return;}chat.messages.push({role:'user',content:input});chat.title=chat.messages.find(m=>m.role==='user').content.slice(0,45);$('#prompt').value='';$('#prompt').style.height='auto';attachment=null;renderAttachment();}
  else if(chat.messages.at(-1)?.role==='assistant'){chat.messages.pop();}
@@ -75,13 +90,13 @@ async function generate(regenerate=false) {
  finally {setBusy(false);activatePendingModel();save();render();scrollBottom();}
 }
 function renderAttachment(){const el=$('#attachment');el.replaceChildren();el.hidden=!attachment;if(attachment){const text=document.createElement('span');text.textContent='Textdatei: '+attachment.name;const remove=document.createElement('button');remove.textContent='Entfernen';remove.onclick=()=>{attachment=null;renderAttachment();};el.append(text,remove);}}
-$('#composer').onsubmit=e=>{e.preventDefault();generate();};$('#prompt').oninput=()=>{const el=$('#prompt');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,180)+'px';if(el.value.trim()&&selectedModel==='auto'&&autoTarget!=='large'){autoTarget='large';updateModelUI();loadModel('large').catch(()=>{});}else if(el.value.trim()&&selectedModel!=='auto'&&activeModel!==selectedModel)loadModel(selectedModel).catch(()=>{});};$('#prompt').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&matchMedia('(min-width:761px)').matches){e.preventDefault();generate();}};
+$('#composer').onsubmit=e=>{e.preventDefault();generate();};$('#prompt').oninput=()=>{const el=$('#prompt');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,180)+'px';if(el.value.trim()&&selectedModel==='auto'&&autoTarget!=='large'){autoTarget='large';updateModelUI();prepareLargeInBackground();}else if(el.value.trim()&&selectedModel!=='auto'&&activeModel!==selectedModel)loadModel(selectedModel).catch(()=>{});};$('#prompt').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&matchMedia('(min-width:761px)').matches){e.preventDefault();generate();}};
 $('#new-chat').onclick=newChat;$('#search').oninput=renderHistory;
 $('#menu').onclick=()=>{if(matchMedia('(max-width:760px)').matches){const open=document.body.classList.toggle('sidebar-open');$('#scrim').hidden=!open;$('#menu').setAttribute('aria-expanded',String(open));if(open)$('#close-sidebar').focus();}else{document.body.classList.toggle('sidebar-hidden');$('#menu').setAttribute('aria-expanded',String(!document.body.classList.contains('sidebar-hidden')));}};
 $('#close-sidebar').onclick=closeSidebar;$('#scrim').onclick=closeSidebar;
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeSidebar();if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();newChat();}});
 for(const id of ['settings-open','model-open','status-open','about'])$('#'+id).onclick=()=>$('#settings').showModal();$('#load-model').onclick=()=>loadModel().catch(()=>{});
-$('#model-choice').onchange=e=>{selectedModel=e.target.value;if(selectedModel==='auto')autoTarget=$('#prompt').value.trim()?'large':'mini';localStorage.setItem('kiwigpt-model-v2',selectedModel);updateModelUI();loadModel(desiredModel()).catch(()=>{});};
+$('#model-choice').onchange=e=>{selectedModel=e.target.value;if(selectedModel==='auto')autoTarget=$('#prompt').value.trim()?'large':'mini';localStorage.setItem('kiwigpt-model-v2',selectedModel);updateModelUI();if(selectedModel==='auto'&&autoTarget==='large')prepareLargeInBackground();else loadModel(desiredModel()).catch(()=>{});};
 document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;$('#prompt').dispatchEvent(new Event('input'));$('#prompt').focus();});
 $('#attach').onclick=()=>$('#file').click();$('#file').onchange=async e=>{const file=e.target.files[0];e.target.value='';if(!file)return;if(file.size>1600){notice('Bitte eine kleine Textdatei mit höchstens 1.600 Bytes auswählen. Größere Dokumente passen nicht in den Kontext.');return;}if(!/\.(txt|md|csv|json)$/i.test(file.name)){notice('Unterstützt werden TXT, Markdown, CSV und JSON.');return;}try{attachment={name:file.name,text:await file.text()};renderAttachment();notice('');}catch{notice('Die Datei konnte nicht gelesen werden.');}};
 $('#mic').onclick=async()=>{const Speech=window.SpeechRecognition||window.webkitSpeechRecognition;if(!Speech){notice('Diktieren ist in diesem Browser nicht verfügbar. Nutze alternativ das Mikrofon deiner Tastatur.');return;}if(recognition){recognition.stop();return;}if(!voiceConsent){voiceConsent=await confirmAction('Diktieren aktivieren?','Die Spracherkennung deines Browsers kann deine Audioaufnahme an seinen Anbieter senden. Dies ist nicht zwingend lokal. Fortfahren?');if(!voiceConsent)return;}try{recognition=new Speech();recognition.lang='de-DE';recognition.interimResults=false;recognition.onresult=e=>{$('#prompt').value+=($('#prompt').value?' ':'')+e.results[0][0].transcript;$('#prompt').dispatchEvent(new Event('input'));};recognition.onerror=e=>notice('Diktieren nicht möglich: '+e.error);recognition.onend=()=>{recognition=null;$('#mic').setAttribute('aria-label','Nachricht diktieren');$('#mic').style.color='';};recognition.start();$('#mic').style.color='#b7d0bd';$('#mic').setAttribute('aria-label','Diktieren stoppen');notice('Mikrofon aktiv. Sprich deine Nachricht. Sie wird nicht automatisch gesendet.');}catch(e){recognition=null;notice(e.message);}};
